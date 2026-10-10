@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="ASCII Cam renders your webcam feed as real-time ASCII art, right in the browser. No uploads, no server — 100% client-side.">
+<meta name="theme-color" content="#0a0a0a">
+<meta property="og:title" content="ASCII Cam">
+<meta property="og:description" content="Your webcam feed rendered as real-time ASCII art in the browser.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+<title>ASCII Cam</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --fg: #33ff66;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    overflow: hidden;
+  }
+  h1 {
+    font-size: 20px;
+    letter-spacing: 4px;
+    padding: 12px 0 4px;
+    text-shadow: 0 0 6px var(--fg);
+  }
+  #pre {
+    font-size: 9px;
+    line-height: 1.05;
+    letter-spacing: 1px;
+    white-space: pre;
+  }
+  #blank {
+    color: #444;
+    font-size: 16px;
+    letter-spacing: 2px;
+    margin-top: 40px;
+    text-align: center;
+    line-height: 2;
+    max-width: 90vw;
+  }
+  #blank button {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--fg);
+    font-family: inherit;
+    font-size: 15px;
+    padding: 10px 20px;
+    margin: 6px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+  }
+  #blank button:hover {
+    background: var(--fg);
+    color: var(--bg);
+  }
+  .hidden { display: none !important; }
+  .controls {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    z-index: 10;
+    display: flex;
+    gap: 8px;
+  }
+  .controls button {
+    background: rgba(0,0,0,.6);
+    border: 1px solid #333;
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 12px;
+    padding: 6px 10px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+  }
+  .controls button:hover { border-color: var(--fg); }
+  .controls button.x { color: #ff6; }
+  #fps {
+    position: fixed;
+    bottom: 8px;
+    left: 8px;
+    font-size: 12px;
+    color: #666;
+    z-index: 10;
+  }
+  #err {
+    position: fixed;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #111;
+    border: 1px solid #f66;
+    color: #f88;
+    font-size: 13px;
+    padding: 4px 10px;
+    z-index: 11;
+    white-space: nowrap;
+    max-width: 96vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #err.ok {
+    border-color: var(--fg);
+    color: var(--fg);
+  }
+</style>
+</head>
+<body>
+
+  <h1>ASCII CAM</h1>
+
+  <div class="controls">
+    <button id="colorBtn">Color</button>
+    <button id="mirrorBtn" class="x">Mirror: ON</button>
+    <button id="invertBtn">Invert</button>
+  </div>
+
+  <div id="blank">
+    <p>Your webcam feed rendered as ASCII art.</p>
+    <button id="startBtn">[ Start Camera ]</button>
+    <button id="demoBtn">[ Demo (no camera) ]</button>
+  </div>
+
+  <pre id="pre" class="hidden"></pre>
+  <div id="fps"></div>
+  <div id="err" class="hidden"></div>
+
+  <video id="video" autoplay playsinline muted style="display:none"></video>
+  <canvas id="src" style="display:none"></canvas>
+
+<script>
+(function () {
+  const pre      = document.getElementById('pre');
+  const blank    = document.getElementById('blank');
+  const startBtn = document.getElementById('startBtn');
+  const demoBtn  = document.getElementById('demoBtn');
+  const colorBtn = document.getElementById('colorBtn');
+  const invertBtn= document.getElementById('invertBtn');
+  const mirrorBtn= document.getElementById('mirrorBtn');
+  const fpsEl    = document.getElementById('fps');
+  const errEl    = document.getElementById('err');
+  const video    = document.getElementById('video');
+  const srcCv    = document.getElementById('src');
+  const srcCtx   = srcCv.getContext('2d');
+
+  const CHARS = ' .\'`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+
+  const COLS = 110;
+  const srcW = 320;
+  const srcH = 180;
+  let ROWS = 50;
+  let colorMode = false;
+  let mirrored = true;
+  let inverted = false;
+  let stream = null;
+  let mode = null;      // 'cam' | 'demo'
+  let raf = 0;
+  let seed = 0;
+
+  srcCv.width = srcW;
+  srcCv.height = srcH;
+
+  function setErr(msg, ok) {
+    errEl.textContent = msg;
+    errEl.classList.remove('hidden', 'ok');
+    if (ok) errEl.classList.add('ok');
+  }
+  function clearErr() { errEl.classList.add('hidden'); }
+  function log(msg) { console.log('[ascii-cam]', msg); }
+
+  window.addEventListener('error', function (e) {
+    setErr('JS error: ' + (e.message || e));
+    if (e.error) console.error(e.error);
+  });
+
+  function hex2str(n) {
+    let h = n.toString(16);
+    while (h.length < 6) h = '0' + h;
+    return h;
+  }
+
+  startBtn.addEventListener('click', start);
+  demoBtn.addEventListener('click', startDemo);
+  colorBtn.addEventListener('click', function () { colorMode = !colorMode; colorBtn.textContent = colorMode ? 'B/W' : 'Color'; });
+  invertBtn.addEventListener('click', function () { inverted = !inverted; invertBtn.textContent = inverted ? 'Invert: ON' : 'Invert'; });
+  mirrorBtn.addEventListener('click', function () { mirrored = !mirrored; mirrorBtn.textContent = mirrored ? 'Mirror: ON' : 'Mirror'; });
+
+  function showFeed() {
+    blank.classList.add('hidden');
+    pre.classList.remove('hidden');
+    clearErr();
+  }
+
+  function startDemo() {
+    log('starting demo');
+    cleanup();
+    mode = 'demo';
+    showFeed();
+    loop();
+  }
+
+  function start() {
+    log('start clicked');
+    if (!window.isSecureContext) {
+      setErr('Camera needs a secure context. Open via https:// or file://');
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setErr('getUserMedia is not available in this browser.');
+      return;
+    }
+    cleanup();
+    showFeed();
+
+    navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 360 } } })
+      .then(function (s) {
+        stream = s;
+        video.srcObject = s;
+        mode = 'cam';
+        showFeed();
+        return video.play();
+      })
+      .then(function () {
+        loop();
+        log('camera running');
+      })
+      .catch(function (e) {
+        setErr('Camera error: ' + (e && (e.name || e.message) ? (e.name + ': ' + e.message) : e));
+        blank.classList.remove('hidden');
+        pre.classList.add('hidden');
+        if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+      });
+  }
+
+  function cleanup() {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    mode = null;
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+    video.srcObject = null;
+    pre.textContent = '';
+  }
+
+  function loop() {
+    raf = requestAnimationFrame(function () {
+      try { render(); } catch (e) { setErr('render error: ' + e.message); }
+      if (mode) loop();
+    });
+  }
+
+  function computeRows() {
+    const winH = window.innerHeight - 90;
+    const fontSize = parseFloat(getComputedStyle(pre).fontSize);
+    ROWS = Math.max(20, Math.floor(winH / fontSize));
+  }
+
+  function drawDemo(t) {
+    seed += 0.05;
+    const cx = Math.sin(seed) * 60 + 90;
+    const cy = Math.cos(seed * 0.7) * 40 + 90;
+    for (let y = 0; y < srcH; y++) {
+      for (let x = 0; x < srcW; x++) {
+        const dx = x - cx, dy = y - cy;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        const v = 128 + 120 * Math.sin(d * 0.15 - t * 2);
+        const r = Math.max(0, Math.min(255, v));
+        srcCtx.fillStyle = 'rgb(' + r + ',' + (r * 0.8) + ',' + (255 - v) + ')';
+        srcCtx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+
+  function render() {
+    if (mode === 'cam') {
+      if (video.readyState < 2) return;
+      if (mirrored) {
+        srcCtx.save();
+        srcCtx.translate(srcW, 0);
+        srcCtx.scale(-1, 1);
+        srcCtx.drawImage(video, 0, 0, srcW, srcH);
+        srcCtx.restore();
+      } else {
+        srcCtx.drawImage(video, 0, 0, srcW, srcH);
+      }
+    } else {
+      drawDemo(performance.now() / 1000);
+    }
+
+    const img = srcCtx.getImageData(0, 0, srcW, srcH).data;
+    const out = [];
+
+    for (let y = 0; y < ROWS; y++) {
+      const sy = Math.floor(y * srcH / ROWS);
+      let row = '';
+      for (let x = 0; x < COLS; x++) {
+        const sx = Math.floor(x * srcW / COLS);
+        const i = (sy * srcW + sx) * 4;
+        const r = img[i], g = img[i + 1], b = img[i + 2];
+        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        const f = inverted ? 1 - lum / 255 : lum / 255;
+        const idx = Math.floor((1 - f) * (CHARS.length - 1));
+        const c = CHARS[idx];
+        if (colorMode) {
+          row += '<span style="color:#' + hex2str((r << 16) | (g << 8) | b) + '">' + c + '</span>';
+        } else {
+          row += c;
+        }
+      }
+      out.push(row);
+    }
+
+    pre.innerHTML = colorMode
+      ? out.join('\n')
+      : out.map(esc).join('\n');
+  }
+
+  const escMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
+  function esc(s) { return s.replace(/[&<>"']/g, function (m) { return escMap[m]; }); }
+
+  let lastT = performance.now();
+  setInterval(function () {
+    const now = performance.now();
+    fpsEl.textContent = Math.round(1000 / Math.max(1, now - lastT)) + ' fps';
+    lastT = now;
+  }, 1000);
+
+  window.addEventListener('resize', computeRows);
+}());
+</script>
+</body>
+</html>
