@@ -3,7 +3,7 @@
 > Your webcam feed rendered as **real-time ASCII art** — entirely in the browser.
 
 <p align="center">
-  <img src="assets/preview.png" alt="ASCII Cam rendering a pattern as ASCII art" width="760">
+  <img src="assets/demo.gif" alt="Animated demo of ASCII Cam rendering a moving pattern as ASCII art" width="760">
 </p>
 
 ASCII Cam turns your webcam into a retro terminal. Every frame is downsampled,
@@ -88,7 +88,8 @@ The character ramp and grid dimensions are defined near the top of the script in
 ├── index.html          # the entire app (HTML + CSS + JS)
 ├── assets/
 │   ├── favicon.svg     # site icon
-│   └── preview.png     # README preview image
+│   ├── demo.gif        # animated README demo
+│   └── preview.png     # static preview / social share image
 ├── .gitignore
 ├── LICENSE
 └── README.md
