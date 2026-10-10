@@ -18,11 +18,14 @@ never leaves your machine.
 ## Features
 
 - 📷 **Live webcam → ASCII** in real time via `getUserMedia` + `<canvas>`
+- 🔍 **2K capture** — requests up to **2560×1440** (with automatic fallback)
+- 🎯 **Precise cells** — every character is a *box-average* of its source region, not a single sampled pixel
+- 🧮 **Adaptive density** — the grid fills the screen at the screen's native character resolution
 - 🎛️ **Toggleable controls** — Color / B&W, Mirror, Invert
 - 🧪 **Demo mode** — a generated animated pattern when you have no camera
-- 🎨 **Color mode** — each character is tinted with the sampled pixel color
+- 🎨 **Fast color mode** — glyphs are tinted via `background-clip: text` (no per-character DOM nodes)
 - 🖥️ **No build step** — one self-contained `index.html`, zero dependencies
-- 📱 **Responsive** — the grid adapts to the window height
+- 📱 **Responsive** — reflows to any window size while keeping the camera's aspect ratio
 - 🔒 **Private by design** — frames are processed locally and never transmitted
 
 ---
@@ -69,15 +72,21 @@ No camera? Click **Demo (no camera)** to see the renderer in action.
 
 ## How it works
 
-1. The webcam frame is drawn into an offscreen `<canvas>` (and mirrored if enabled).
-2. `getImageData` samples one pixel per character cell.
-3. Each pixel's luminance is computed with `0.2126R + 0.7152G + 0.0722B`.
-4. The luminance selects a character from a density ramp, and (in color mode)
-   the character is tinted with the sampled color.
-5. The resulting text is written to a `<pre>` element every animation frame.
+1. The webcam is requested at up to **2560×1440**. Its frame is drawn straight into
+   a tiny `COLS × ROWS` canvas, so the browser high-quality-downsamples the whole
+   frame in one step — **every character cell becomes a box-average of its source
+   region** rather than a single, noisy sampled pixel.
+2. The grid size is derived from the window size and the font metrics, so the
+   picture keeps the camera's aspect ratio and fills the available space.
+3. Each cell's luminance (`0.2126R + 0.7152G + 0.0722B`) selects a character from
+   the density ramp.
+4. In **color mode**, the small color canvas is applied as the `<pre>`'s
+   background and clipped to the text glyphs (`background-clip: text`), tinting
+   every character with its own colour using zero extra DOM nodes.
+5. The text is written to a `<pre>` element every animation frame.
 
-The character ramp and grid dimensions are defined near the top of the script in
-`index.html` (`CHARS`, `COLS`), so they're easy to tweak.
+The character ramp lives in `index.html` (`CHARS`); the grid dimensions are
+computed automatically and adapt to any screen.
 
 ---
 

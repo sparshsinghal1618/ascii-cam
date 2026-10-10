@@ -18,33 +18,57 @@
     --fg: #33ff66;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
     background: var(--bg);
     color: var(--fg);
     font-family: monospace;
-    min-height: 100vh;
+    height: 100vh;
     display: flex;
     flex-direction: column;
     align-items: center;
     overflow: hidden;
   }
   h1 {
-    font-size: 20px;
+    font-size: 16px;
     letter-spacing: 4px;
-    padding: 12px 0 4px;
+    padding: 8px 0 2px;
     text-shadow: 0 0 6px var(--fg);
+    flex: 0 0 auto;
+  }
+  #stage {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
   }
   #pre {
-    font-size: 9px;
-    line-height: 1.05;
-    letter-spacing: 1px;
+    font-family: "Cascadia Mono", "Consolas", "SFMono-Regular", "DejaVu Sans Mono", "Courier New", monospace;
+    font-size: 8px;
+    line-height: 1;
+    letter-spacing: 0;
     white-space: pre;
+    font-variant-ligatures: none;
+  }
+  /* Color mode: the low-res color image is clipped to the glyphs, so each
+     character is tinted by its cell's sampled color — no per-char DOM nodes. */
+  #pre.color {
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    background-position: 0 0;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
   }
   #blank {
     color: #444;
     font-size: 16px;
     letter-spacing: 2px;
-    margin-top: 40px;
+    margin-top: 0;
     text-align: center;
     line-height: 2;
     max-width: 90vw;
@@ -127,18 +151,20 @@
     <button id="invertBtn">Invert</button>
   </div>
 
-  <div id="blank">
-    <p>Your webcam feed rendered as ASCII art.</p>
-    <button id="startBtn">[ Start Camera ]</button>
-    <button id="demoBtn">[ Demo (no camera) ]</button>
+  <div id="stage">
+    <div id="blank">
+      <p>Your webcam feed rendered as ASCII art.</p>
+      <button id="startBtn">[ Start Camera ]</button>
+      <button id="demoBtn">[ Demo (no camera) ]</button>
+    </div>
+    <pre id="pre" class="hidden"></pre>
   </div>
 
-  <pre id="pre" class="hidden"></pre>
   <div id="fps"></div>
   <div id="err" class="hidden"></div>
 
   <video id="video" autoplay playsinline muted style="display:none"></video>
-  <canvas id="src" style="display:none"></canvas>
+  <canvas id="grid" style="display:none"></canvas>
 
 <script>
 (function () {
@@ -152,25 +178,33 @@
   const fpsEl    = document.getElementById('fps');
   const errEl    = document.getElementById('err');
   const video    = document.getElementById('video');
-  const srcCv    = document.getElementById('src');
-  const srcCtx   = srcCv.getContext('2d');
+  const gridCv   = document.getElementById('grid');
+  const gridCtx  = gridCv.getContext('2d', { willReadFrequently: true });
 
   const CHARS = ' .\'`^",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+  const LAST  = CHARS.length - 1;
 
-  const COLS = 110;
-  const srcW = 320;
-  const srcH = 180;
-  let ROWS = 50;
+  // Capture target: 2K. Falls back to lower resolutions if unavailable.
+  const CAM_ATTEMPTS = [
+    { video: { width: { ideal: 2560 }, height: { ideal: 1440 }, facingMode: 'user' } },
+    { video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: 'user' } },
+    { video: { width: { ideal: 1280 }, height: { ideal: 720  }, facingMode: 'user' } },
+    { video: true }
+  ];
+
+  let COLS = 120, ROWS = 48;
+  let charW = 5, charH = 8;
+  let aspect = 16 / 9;
   let colorMode = false;
-  let mirrored = true;
-  let inverted = false;
+  let mirrored  = true;
+  let inverted  = false;
+  let antiAlias = true;                 // box-average cells (vs. crisp/point)
   let stream = null;
-  let mode = null;      // 'cam' | 'demo'
+  let mode = null;                      // 'cam' | 'demo'
   let raf = 0;
   let seed = 0;
-
-  srcCv.width = srcW;
-  srcCv.height = srcH;
+  let frames = 0;
+  let lastError = 0;
 
   function setErr(msg, ok) {
     errEl.textContent = msg;
@@ -185,15 +219,17 @@
     if (e.error) console.error(e.error);
   });
 
-  function hex2str(n) {
-    let h = n.toString(16);
-    while (h.length < 6) h = '0' + h;
-    return h;
-  }
+  function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
   startBtn.addEventListener('click', start);
   demoBtn.addEventListener('click', startDemo);
-  colorBtn.addEventListener('click', function () { colorMode = !colorMode; colorBtn.textContent = colorMode ? 'B/W' : 'Color'; });
+  colorBtn.addEventListener('click', function () {
+    colorMode = !colorMode;
+    colorBtn.textContent = colorMode ? 'B/W' : 'Color';
+    pre.classList.toggle('color', colorMode);
+    if (!colorMode) pre.style.backgroundImage = 'none';
+    computeGrid();
+  });
   invertBtn.addEventListener('click', function () { inverted = !inverted; invertBtn.textContent = inverted ? 'Invert: ON' : 'Invert'; });
   mirrorBtn.addEventListener('click', function () { mirrored = !mirrored; mirrorBtn.textContent = mirrored ? 'Mirror: ON' : 'Mirror'; });
 
@@ -207,6 +243,8 @@
     log('starting demo');
     cleanup();
     mode = 'demo';
+    aspect = 16 / 9;
+    computeGrid();
     showFeed();
     loop();
   }
@@ -224,7 +262,7 @@
     cleanup();
     showFeed();
 
-    navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 360 } } })
+    requestCamera()
       .then(function (s) {
         stream = s;
         video.srcObject = s;
@@ -233,8 +271,12 @@
         return video.play();
       })
       .then(function () {
+        if (video.videoWidth) {
+          aspect = video.videoWidth / video.videoHeight;
+        }
+        computeGrid();
         loop();
-        log('camera running');
+        log('camera running at ' + video.videoWidth + 'x' + video.videoHeight);
       })
       .catch(function (e) {
         setErr('Camera error: ' + (e && (e.name || e.message) ? (e.name + ': ' + e.message) : e));
@@ -242,6 +284,17 @@
         pre.classList.add('hidden');
         if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
       });
+  }
+
+  // Try each constraint set in order until one is granted.
+  function requestCamera() {
+    let chain = Promise.reject(new Error('init'));
+    CAM_ATTEMPTS.forEach(function (constraints) {
+      chain = chain.catch(function () {
+        return navigator.mediaDevices.getUserMedia(constraints);
+      });
+    });
+    return chain;
   }
 
   function cleanup() {
@@ -259,83 +312,138 @@
     });
   }
 
-  function computeRows() {
-    const winH = window.innerHeight - 90;
-    const fontSize = parseFloat(getComputedStyle(pre).fontSize);
-    ROWS = Math.max(20, Math.floor(winH / fontSize));
+  // Measure the monospace cell size for the current <pre> styling.
+  function measureFont() {
+    const cs = getComputedStyle(pre);
+    const fs = parseFloat(cs.fontSize);
+    const ff = cs.fontFamily;
+    let ls = parseFloat(cs.letterSpacing); if (isNaN(ls)) ls = 0;
+    let lh = parseFloat(cs.lineHeight);     if (isNaN(lh)) lh = fs;
+    const mctx = document.createElement('canvas').getContext('2d');
+    mctx.font = fs + 'px ' + ff;
+    charW = Math.max(1, mctx.measureText('M').width + ls);
+    charH = Math.max(1, lh);
   }
 
-  function drawDemo(t) {
+  // Fit the densest aspect-correct grid that fills the stage.
+  function computeGrid() {
+    measureFont();
+    const stage = document.getElementById('stage');
+    const AW = stage.clientWidth || window.innerWidth;
+    const AH = stage.clientHeight || (window.innerHeight - 56);
+
+    // Keep the ASCII picture's aspect ratio equal to the source aspect.
+    const k = aspect * charH / charW;                 // cols per row
+    let rows = Math.min(Math.floor(AH / charH), Math.floor(AW / (charW * k)));
+    rows = Math.max(10, rows);
+    let cols = Math.max(10, Math.floor(k * rows));
+
+    // Guard performance / DOM size.
+    const cap = 40000;
+    if (cols * rows > cap) {
+      const s = Math.sqrt(cap / (cols * rows));
+      rows = Math.max(8, Math.floor(rows * s));
+      cols = Math.max(8, Math.floor(cols * s));
+    }
+
+    ROWS = rows;
+    COLS = cols;
+    gridCv.width = COLS;
+    gridCv.height = ROWS;
+    gridCtx.imageSmoothingEnabled = antiAlias;
+    gridCtx.imageSmoothingQuality = 'high';
+    log('grid ' + COLS + 'x' + ROWS);
+  }
+
+  function drawDemo() {
     seed += 0.05;
+    const VW = 320, VH = 180;
     const cx = Math.sin(seed) * 60 + 90;
     const cy = Math.cos(seed * 0.7) * 40 + 90;
-    for (let y = 0; y < srcH; y++) {
-      for (let x = 0; x < srcW; x++) {
-        const dx = x - cx, dy = y - cy;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        const v = 128 + 120 * Math.sin(d * 0.15 - t * 2);
-        const r = Math.max(0, Math.min(255, v));
-        srcCtx.fillStyle = 'rgb(' + r + ',' + (r * 0.8) + ',' + (255 - v) + ')';
-        srcCtx.fillRect(x, y, 1, 1);
+    const t = performance.now() / 1000;
+    const id = gridCtx.createImageData(COLS, ROWS);
+    const d = id.data;
+    for (let y = 0; y < ROWS; y++) {
+      const vy = (y + 0.5) * VH / ROWS;
+      for (let x = 0; x < COLS; x++) {
+        const vx = (x + 0.5) * VW / COLS;
+        const dx = vx - cx, dy = vy - cy;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const v = 128 + 120 * Math.sin(dist * 0.15 - t * 2);
+        const r = clamp255(v);
+        const i = (y * COLS + x) * 4;
+        d[i]     = r;
+        d[i + 1] = clamp255(r * 0.8);
+        d[i + 2] = clamp255(255 - v);
+        d[i + 3] = 255;
       }
     }
+    gridCtx.putImageData(id, 0, 0);
   }
 
   function render() {
     if (mode === 'cam') {
       if (video.readyState < 2) return;
-      if (mirrored) {
-        srcCtx.save();
-        srcCtx.translate(srcW, 0);
-        srcCtx.scale(-1, 1);
-        srcCtx.drawImage(video, 0, 0, srcW, srcH);
-        srcCtx.restore();
-      } else {
-        srcCtx.drawImage(video, 0, 0, srcW, srcH);
+      if (video.videoWidth) {
+        const a = video.videoWidth / video.videoHeight;
+        if (Math.abs(a - aspect) > 0.001) { aspect = a; computeGrid(); }
       }
+      // The browser high-quality-downsamples the whole frame into the tiny
+      // COLS x ROWS canvas, so every character cell is a box-average of its
+      // source region — not a single sampled pixel.
+      gridCtx.save();
+      if (mirrored) { gridCtx.translate(COLS, 0); gridCtx.scale(-1, 1); }
+      gridCtx.drawImage(video, 0, 0, COLS, ROWS);
+      gridCtx.restore();
     } else {
-      drawDemo(performance.now() / 1000);
+      drawDemo();
     }
 
-    const img = srcCtx.getImageData(0, 0, srcW, srcH).data;
-    const out = [];
+    const img = gridCtx.getImageData(0, 0, COLS, ROWS).data;
+    const lines = new Array(ROWS);
 
-    for (let y = 0; y < ROWS; y++) {
-      const sy = Math.floor(y * srcH / ROWS);
-      let row = '';
-      for (let x = 0; x < COLS; x++) {
-        const sx = Math.floor(x * srcW / COLS);
-        const i = (sy * srcW + sx) * 4;
-        const r = img[i], g = img[i + 1], b = img[i + 2];
-        const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        const f = inverted ? 1 - lum / 255 : lum / 255;
-        const idx = Math.floor((1 - f) * (CHARS.length - 1));
-        const c = CHARS[idx];
-        if (colorMode) {
-          row += '<span style="color:#' + hex2str((r << 16) | (g << 8) | b) + '">' + c + '</span>';
-        } else {
-          row += c;
+    if (colorMode) {
+      for (let y = 0; y < ROWS; y++) {
+        let row = '';
+        for (let x = 0; x < COLS; x++) {
+          const i = (y * COLS + x) * 4;
+          const lum = 0.2126 * img[i] + 0.7152 * img[i + 1] + 0.0722 * img[i + 2];
+          const f = inverted ? 1 - lum / 255 : lum / 255;
+          row += CHARS[Math.floor((1 - f) * LAST)];
         }
+        lines[y] = row;
       }
-      out.push(row);
+      pre.textContent = lines.join('\n');
+      // One background image per frame tints every glyph (see #pre.color).
+      pre.style.backgroundImage = 'url(' + gridCv.toDataURL() + ')';
+    } else {
+      for (let y = 0; y < ROWS; y++) {
+        let row = '';
+        for (let x = 0; x < COLS; x++) {
+          const i = (y * COLS + x) * 4;
+          const lum = 0.2126 * img[i] + 0.7152 * img[i + 1] + 0.0722 * img[i + 2];
+          const f = inverted ? 1 - lum / 255 : lum / 255;
+          row += CHARS[Math.floor((1 - f) * LAST)];
+        }
+        lines[y] = row;
+      }
+      pre.textContent = lines.join('\n');
     }
 
-    pre.innerHTML = colorMode
-      ? out.join('\n')
-      : out.map(esc).join('\n');
+    frames++;
   }
 
-  const escMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
-  function esc(s) { return s.replace(/[&<>"']/g, function (m) { return escMap[m]; }); }
-
-  let lastT = performance.now();
   setInterval(function () {
-    const now = performance.now();
-    fpsEl.textContent = Math.round(1000 / Math.max(1, now - lastT)) + ' fps';
-    lastT = now;
+    const fps = frames;
+    frames = 0;
+    let txt = fps + ' fps';
+    if (mode === 'cam' && video.videoWidth) txt += '  ·  ' + video.videoWidth + '×' + video.videoHeight + ' src';
+    txt += '  ·  ' + COLS + '×' + ROWS + ' chars';
+    fpsEl.textContent = txt;
   }, 1000);
 
-  window.addEventListener('resize', computeRows);
+  window.addEventListener('resize', function () { try { computeGrid(); } catch (e) {} });
+  computeGrid();
 }());
 </script>
 </body>
